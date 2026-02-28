@@ -15,8 +15,9 @@ if "controller" not in st.session_state:
 # Thread-safe state shared between the WebRTC callback thread and the main Streamlit thread
 _lock = threading.Lock()
 _last_analysis = {}
-_next_allowed_call = 0.0  # epoch seconds; enforces minimum gap between API calls
-_CALL_INTERVAL = 5.0      # seconds between Gemini requests
+_next_allowed_call = 0.0
+_CALL_INTERVAL = 12.0
+_429_BACKOFF = 60.0
 _analyzing = False
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
@@ -50,14 +51,14 @@ def _draw_boxes(img, analysis):
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
             cv2.putText(img, "pedestrian", (x1, max(y1 - 5, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-    for obj in analysis.get("test_objects", []):
-        box = obj.get("box_2d", [])
+    for hand in analysis.get("hands", []):
+        box = hand.get("box_2d", [])
         if len(box) == 4:
             y_min, x_min, y_max, x_max = box
             x1, y1 = int(x_min * w / 1000), int(y_min * h / 1000)
             x2, y2 = int(x_max * w / 1000), int(y_max * h / 1000)
             cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 2)
-            cv2.putText(img, obj.get("label", "object"), (x1, max(y1 - 5, 0)),
+            cv2.putText(img, "hand", (x1, max(y1 - 5, 0)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
 
 def _run_analysis(frame_bytes):
@@ -69,7 +70,7 @@ def _run_analysis(frame_bytes):
             _next_allowed_call = time.time() + _CALL_INTERVAL
     except Exception as e:
         print(f"Gemini analysis error: {e}")
-        backoff = _CALL_INTERVAL * 3 if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) else _CALL_INTERVAL
+        backoff = _429_BACKOFF if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) else _CALL_INTERVAL
         with _lock:
             _next_allowed_call = time.time() + backoff
     finally:
@@ -85,8 +86,7 @@ def video_frame_callback(frame):
         ready = time.time() >= _next_allowed_call and not _analyzing
 
     if ready:
-        small = cv2.resize(img, (640, 360))
-        _, buffer = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         with _lock:
             _analyzing = True
         _executor.submit(_run_analysis, buffer.tobytes())
